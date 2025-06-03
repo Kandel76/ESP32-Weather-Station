@@ -1,11 +1,3 @@
-/* HTTP GET Example using plain POSIX sockets
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -29,6 +21,7 @@
 #include "freertos/task.h"
 #include "freertos/FreeRTOS.h"
 
+//I2C Definitions
 #define I2C_MASTER_NUM                  I2C_NUM_0
 #define I2C_MASTER_SCL_IO               8
 #define I2C_MASTER_SDA_IO               10
@@ -37,7 +30,21 @@
 #define WRITE_DELAY                     5
 #define POWER_ON_DELAY                  15
 
+//Web server and port for the client server
+/*
+ * this is where the location will come from and 
+ * where all of the information will go towards
+*/
+#define WEB_SERVER "192.168.0.158"
+#define WEB_PORT "1234"
+#define WEB_PATH "/"
+static const char *TAG = "example";
+
+
+
 //functions to read temperature and humidity
+
+//intialize I2C bus
 void i2c_master_init(void){
         i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,                            // Set as master
@@ -52,6 +59,8 @@ void i2c_master_init(void){
     i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0); // Install I2C driver
 }
 
+
+//checksum
 bool check_crc(uint8_t *data) {
     uint8_t crc = 0xFF;
     for (int i = 0; i < 2; i++) {
@@ -64,20 +73,21 @@ bool check_crc(uint8_t *data) {
     return (crc == data[2]);
 }
 
-
+//powerup function for the temp sensor
 void power_up(void){
-        //wakeup command
         uint8_t cmd[]= {0x35,0x17};
         i2c_master_write_to_device(I2C_MASTER_NUM, SHTC_SENSOR_ADDR, cmd, 2, 1000 / portTICK_PERIOD_MS); // Send command
         vTaskDelay(POWER_ON_DELAY / portTICK_PERIOD_MS);  // Wait 15ms after wakeup
 }
 
+//power down for the temp sensor
 void power_down(void){
         uint8_t cmd[]= {0xB0, 0x98};
         i2c_master_write_to_device(I2C_MASTER_NUM, SHTC_SENSOR_ADDR, cmd, 2, 1000 / portTICK_PERIOD_MS); // Send command
         vTaskDelay(POWER_ON_DELAY / portTICK_PERIOD_MS);  // Wait 15ms after wakeup
 }
 
+//read temp and convert to cel
 float read_temp_cel(void) {
     uint8_t cmd[] = {0x7C, 0xA2};  // Temp first
     i2c_master_write_to_device(I2C_MASTER_NUM, SHTC_SENSOR_ADDR, cmd, 2, 1000 / portTICK_PERIOD_MS);
@@ -94,6 +104,7 @@ float read_temp_cel(void) {
     return -45.0 + 175.0 * (raw_temp / 65535.0);
 }
 
+//read humidity
 float read_humidity() {
     uint8_t cmd[] = {0x5C, 0x24};  // Hum first
     i2c_master_write_to_device(I2C_MASTER_NUM, SHTC_SENSOR_ADDR, cmd, 2, 1000 / portTICK_PERIOD_MS);
@@ -115,14 +126,7 @@ float read_humidity() {
 }
 
 
-/* Constants that aren't configurable in menuconfig */
-#define WEB_SERVER "192.168.0.158"
-#define WEB_PORT "1234"
-#define WEB_PATH "/"
-
-static const char *TAG = "example";
-
-
+//http post function
 static void http_post_task(void *pvParameters){
     char *post_data = (char *)pvParameters;
 
@@ -208,8 +212,7 @@ static void http_post_task(void *pvParameters){
     vTaskDelete(NULL);
 }
 
-//-----------------------------------------------------
-
+//get location from the initial server(pi)
 static void http_get_location(char *location_buf, size_t buf_size) {
     const struct addrinfo hints = {
         .ai_family = AF_INET,
@@ -278,10 +281,12 @@ static void http_get_location(char *location_buf, size_t buf_size) {
     close(s);
 }
 
-//-----------------------------------------------------
+/*
+ * this is where the weather information comes from
+*/
+
 #define WEB_PORT_WTTR "80"  // Port for wttr.in
 #define WEB_SERVER_WTTR "wttr.in"  // Port for wttr.in
-// #define WEB_PATH_WTTR "/San-Francisco?format=%t"  // Weather for Tokyo, Japan
 
 static void http_get_wttr_temp(const char *location, char *temp_buf, size_t buf_size) {
     // snprintf(path, sizeof(path), "/%s?format=%%t", location);
@@ -358,7 +363,7 @@ static void http_get_wttr_temp(const char *location, char *temp_buf, size_t buf_
 }
 
 
-
+//main
 void app_main(void)
 {
     ESP_ERROR_CHECK( nvs_flash_init() );
@@ -402,25 +407,26 @@ void app_main(void)
                         vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
         }
 
-        // 1. Get location from server ~~~~~WORKS~~~~~~~~
+        // 1. Get location from server
         http_get_location(location, sizeof(location));
         // location[strcspn(location, "\r\n ")] = 0;
 
-        // 2. Get temperature from wttr.in ~~~~~WORKS~~~~~~~~
+        // 2. Get temperature from wttr.in 
         http_get_wttr_temp(location, wttr_temp, sizeof(wttr_temp));
         // wttr_temp[strcspn(wttr_temp, "\r\n ")] = 0; // Remove trailing newline or whitespace
 
-        // 3. Combine and send ~~~~~~WORKS~~~~~~~~
+        // 3. Combine and Format the data
         char *post_data = malloc(200);
         if (post_data == NULL) {
             ESP_LOGE(TAG, "Failed to allocate memory for post_data");
             continue;
         }
+
         snprintf(post_data, 200, 
             "\n\n======================================\n\nLocation: %s\nTemp= %s \n\nLocation: Local\nTemp: +%d°F\nLocal Humidity: %d%%\n\n======================================\n\n", 
             location, wttr_temp, temp_f_int, hum_int);
             
-        //post the information to the server ~~~~~~WORKS~~~~~~~~
+        // 4. post the information to the server 
         xTaskCreate(&http_post_task, "http_post_task", 4096, post_data, 5, NULL);
         ESP_LOGE(TAG, "%s",post_data);
 
